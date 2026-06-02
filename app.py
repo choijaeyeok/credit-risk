@@ -2,13 +2,11 @@ import sys
 sys.path.append("src")
 
 import pickle
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from explain import get_shap_values
-from score import calculate_score, get_grade_and_rate, MIN_INCOME, DSR_LIMIT
+from score import prob_to_score, get_grade_and_rate, MIN_INCOME, DSR_LIMIT, KRW_TO_USD
 
 FEATURE_NAME_MAP = {
     'RevolvingUtilizationOfUnsecuredLines': '신용카드 사용률',
@@ -30,8 +28,8 @@ FEATURE_NAME_MAP = {
 def val_to_label(val):
     abs_val = abs(val)
     if val < 0:
-        if abs_val > 0.5:  return "🔴 매우 불리"
-        if abs_val > 0.2:  return "🟠 불리"
+        if abs_val > 0.3:  return "🔴 매우 불리"
+        if abs_val > 0.1:  return "🟠 불리"
         return "🟡 약간 불리"
     else:
         if abs_val > 0.3:  return "🟢 매우 유리"
@@ -40,14 +38,9 @@ def val_to_label(val):
 
 def val_to_bar(val):
     abs_val = abs(val)
-    if val < 0:
-        if abs_val > 0.5:  return 1.0   # 매우 불리
-        if abs_val > 0.2:  return 0.6   # 불리
-        return 0.3                       # 약간 불리
-    else:
-        if abs_val > 0.3:  return 1.0   # 매우 유리
-        if abs_val > 0.1:  return 0.6   # 유리
-        return 0.3                       # 약간 유리
+    if abs_val > 0.3:  return 1.0
+    if abs_val > 0.1:  return 0.6
+    return 0.3
 
 @st.cache_resource
 def load_model():
@@ -156,43 +149,24 @@ if st.button("🔍 대출 심사 시작", type="primary", use_container_width=Tr
         st.error(f"DSR(총부채상환비율)이 {debt_ratio:.0%}로 기준({DSR_LIMIT:.0%})을 초과하여 대출이 불가합니다.")
         st.stop()
 
-    KRW_TO_USD = 1300
-
     model = load_model()
-    X_input = build_input(age, income, debt_ratio, util_rate,
+
+    # 모델이 미국 달러 기준 데이터로 학습되어 있어 원화 → 달러 변환 후 입력
+    X_input = build_input(age, income / KRW_TO_USD, debt_ratio, util_rate,
                           past30, past60, past90, open_loans,
                           real_estate, dependents)
 
-    # 신용점수 + 등급 + 금리: calculate_score 기반 (원화 기준, 환율 무관)
-    score_result = calculate_score(X_input)
-    grade, rate = get_grade_and_rate(score_result['total'])
+    prob        = model.predict_proba(X_input)[0][1]
+    total_score = prob_to_score(prob)
+    grade, rate = get_grade_and_rate(total_score)
+    _, shap_values = get_shap_values(model, X_input)
 
-    # SHAP 상세분석: XGBoost 사용 (달러 변환 후 입력)
-    X_model = X_input.copy()
-    X_model['MonthlyIncome'] = X_model['MonthlyIncome'] / KRW_TO_USD
-    X_model['MonthlyDebt']   = X_model['MonthlyDebt']   / KRW_TO_USD
-    _, shap_values = get_shap_values(model, X_model)
-
-    # 결과를 session_state에 저장
     st.session_state['result'] = {
         'grade': grade,
         'rate': rate,
-        'total_score': score_result['total'],
-        'detail': score_result['detail'],
+        'total_score': total_score,
         'shap_values': shap_values,
         'X_input': X_input,
-        'loan_payment': loan_payment,
-        'card_payment': card_payment,
-        'card_limit': card_limit,
-        'card_used': card_used,
-        'income': income,
-        'age': age,
-        'past30': past30,
-        'past60': past60,
-        'past90': past90,
-        'open_loans': open_loans,
-        'real_estate': real_estate,
-        'dependents': dependents,
     }
 
 # 결과가 있으면 항상 표시
@@ -201,7 +175,6 @@ if 'result' in st.session_state:
     grade       = r['grade']
     rate        = r['rate']
     total_score = r['total_score']
-    detail      = r['detail']
     shap_values = r['shap_values']
     X_input     = r['X_input']
 
@@ -219,17 +192,9 @@ if 'result' in st.session_state:
         with r2:
             st.metric("신용점수", f"{total_score} / 100")
         with r3:
-            st.metric("신용등급", grade)
+            st.metric("신용등급", grade if rate is not None else "대출 불가")
         with r4:
             st.metric("적용 금리", f"연 {rate}%" if rate else "대출 불가")
-
-        st.markdown("##### 항목별 점수")
-        cols = st.columns(5)
-        for i, (category, val) in enumerate(detail.items()):
-            with cols[i]:
-                s, m = val['score'], val['max']
-                st.metric(category, f"{s} / {m}")
-                st.progress(float(s / m))
 
     # ── 탭2: 상세 분석 ──────────────────────────────────
     with tab2:
@@ -239,9 +204,6 @@ if 'result' in st.session_state:
         pairs  = sorted(zip(names, values), key=lambda x: abs(x[1]), reverse=True)[:8]
         bad  = [(n, v) for n, v in pairs if v < 0]
         good = [(n, v) for n, v in pairs if v >= 0]
-
-        max_bad  = max((abs(v) for _, v in bad),  default=1.0)
-        max_good = max((abs(v) for _, v in good), default=1.0)
 
         col_bad, col_good = st.columns(2)
         with col_bad:

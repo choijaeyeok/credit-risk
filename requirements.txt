@@ -1,8 +1,7 @@
-streamlit
-pandas
-numpy
-xgboost
-shap
-scikit-learn
-plotly
-matplotlib
+streamlit==1.56.0
+pandas==3.0.2
+numpy==2.4.4
+xgboost==3.2.0
+shap==0.51.0
+scikit-learn==1.8.0
+matplotlib==3.10.8
