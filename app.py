@@ -190,7 +190,7 @@ if 'result' in st.session_state:
             else:
                 st.error("❌ 거절")
         with r2:
-            st.metric("신용점수", f"{total_score} / 100")
+            st.metric("신용점수", f"{total_score:.1f} / 100")
         with r3:
             st.metric("신용등급", grade if rate is not None else "대출 불가")
         with r4:
